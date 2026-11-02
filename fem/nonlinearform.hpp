@@ -313,7 +313,8 @@ protected:
    void MultBlocked(const BlockVector &bx, BlockVector &by) const;
 
    /// Specialized version of GetGradient() for BlockVector
-   void ComputeGradientBlocked(const BlockVector &bx, bool finalize = true) const;
+   void ComputeGradientBlocked(const BlockVector &bx, bool finalize = true,
+                               const Array2D<int> *mask = nullptr) const;
 
 public:
    /// Construct an empty BlockNonlinearForm. Initialize with SetSpaces().
@@ -411,6 +412,23 @@ public:
    /// Method is only called in serial, the parallel version calls
    /// GetGradientBlocked directly.
    Operator &GetGradient(const Vector &x) const override;
+
+   /** @brief Assemble the requested Jacobian blocks (serial prototype).
+
+       A nonempty mask must have one row and column per finite element space;
+       nonzero entries select blocks. An empty mask requests every block.
+       The full state @a x is available to every integrator. Unrequested blocks
+       are unset zero blocks in the returned BlockOperator, including on
+       essential boundary rows. Requested blocks have the same boundary
+       treatment as in GetGradient(x).
+
+       The request applies only to this call. GetGradient(x) always assembles
+       the full Jacobian. The returned operator is owned by this form and is
+       invalidated by the next gradient assembly or SetSpaces().
+
+       @warning This prototype supports serial finite element spaces only. */
+   virtual BlockOperator &GetGradient(const Vector &x,
+                                     const Array2D<int> &mask) const;
 
    /// Destructor.
    virtual ~BlockNonlinearForm();

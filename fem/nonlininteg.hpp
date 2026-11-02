@@ -163,7 +163,30 @@ public:
     for block state vectors. */
 class BlockNonlinearFormIntegrator
 {
+protected:
+   /// Empty means that every Jacobian block is requested.
+   Array2D<int> gradient_block_mask;
+
+   /// Whether the current gradient assembly requests block (row, col).
+   bool IsGradientBlockEnabled(int row, int col) const
+   {
+      return gradient_block_mask.NumRows() == 0 ||
+             gradient_block_mask(row, col) != 0;
+   }
+
 public:
+   /** @brief Supply the blocks requested by the next gradient assembly.
+
+       The mask is copied. An empty mask requests every block. Integrators may
+       consult IsGradientBlockEnabled() to avoid local work; existing
+       integrators need not change. This mask does not select input state
+       vectors or affect energy and residual evaluation.
+
+       BlockNonlinearForm supplies this mask before assembly and resets it to
+       empty afterwards. Overrides must preserve that contract. */
+   virtual void SetGradientBlockMask(const Array2D<int> &mask)
+   { gradient_block_mask = mask; }
+
    /// Compute the local energy
    virtual real_t GetElementEnergy(const Array<const FiniteElement *>&el,
                                    ElementTransformation &Tr,

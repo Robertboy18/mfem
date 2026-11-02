@@ -1250,8 +1250,35 @@ void BlockNonlinearForm::Mult(const Vector &x, Vector &y) const
 }
 
 void BlockNonlinearForm::ComputeGradientBlocked(const BlockVector &bx,
-                                                bool finalize) const
+                                                bool finalize,
+                                                const Array2D<int> *mask) const
 {
+   const auto selected = [mask](int i, int j)
+   {
+      return !mask || mask->NumRows() == 0 || (*mask)(i,j) != 0;
+   };
+   // Reset the integrator hint even if an integrator throws during assembly.
+   struct MaskScope
+   {
+      Array<BlockNonlinearFormIntegrator*> integrators;
+      Array2D<int> all;
+      ~MaskScope()
+      {
+         for (auto *integrator : integrators)
+         {
+            integrator->SetGradientBlockMask(all);
+         }
+      }
+   } scope;
+   scope.integrators.Append(dnfi);
+   scope.integrators.Append(bnfi);
+   scope.integrators.Append(fnfi);
+   scope.integrators.Append(bfnfi);
+   for (auto *integrator : scope.integrators)
+   {
+      integrator->SetGradientBlockMask(mask ? *mask : scope.all);
+   }
+
    const int skip_zeros = 0;
    Array<Array<int> *> vdofs(fes.Size());
    Array<Array<int> *> vdofs2(fes.Size());
@@ -1279,7 +1306,12 @@ void BlockNonlinearForm::ComputeGradientBlocked(const BlockVector &bx,
    {
       for (int j=0; j<fes.Size(); ++j)
       {
-         if (Grads(i,j) != NULL)
+         if (!selected(i,j))
+         {
+            delete Grads(i,j);
+            Grads(i,j) = NULL;
+         }
+         else if (Grads(i,j) != NULL)
          {
             *Grads(i,j) = 0.0;
          }
@@ -1339,7 +1371,10 @@ void BlockNonlinearForm::ComputeGradientBlocked(const BlockVector &bx,
             {
                for (int l=0; l<fes.Size(); ++l)
                {
-                  if (elmats(j,l)->Height() == 0) { continue; }
+                  if (!selected(j,l) || elmats(j,l)->Height() == 0)
+                  {
+                     continue;
+                  }
                   TransformDual(doftrans[j], doftrans[l], *elmats(j,l));
                   Grads(j,l)->AddSubMatrix(*vdofs[j], *vdofs[l],
                                            *elmats(j,l), skip_zeros);
@@ -1397,7 +1432,10 @@ void BlockNonlinearForm::ComputeGradientBlocked(const BlockVector &bx,
             {
                for (int l=0; l<fes.Size(); ++l)
                {
-                  if (elmats(j,l)->Height() == 0) { continue; }
+                  if (!selected(j,l) || elmats(j,l)->Height() == 0)
+                  {
+                     continue;
+                  }
                   TransformDual(doftrans[j], doftrans[l], *elmats(j,l));
                   Grads(j,l)->AddSubMatrix(*vdofs[j], *vdofs[l],
                                            *elmats(j,l), skip_zeros);
@@ -1434,7 +1472,10 @@ void BlockNonlinearForm::ComputeGradientBlocked(const BlockVector &bx,
             {
                for (int l=0; l<fes.Size(); ++l)
                {
-                  if (elmats(j,l)->Height() == 0) { continue; }
+                  if (!selected(j,l) || elmats(j,l)->Height() == 0)
+                  {
+                     continue;
+                  }
                   Grads(j,l)->AddSubMatrix(*vdofs[j], *vdofs[l],
                                            *elmats(j,l), skip_zeros);
                }
@@ -1494,7 +1535,10 @@ void BlockNonlinearForm::ComputeGradientBlocked(const BlockVector &bx,
                {
                   for (int j=0; j<fes.Size(); ++j)
                   {
-                     if (elmats(j,l)->Height() == 0) { continue; }
+                     if (!selected(j,l) || elmats(j,l)->Height() == 0)
+                     {
+                        continue;
+                     }
                      Grads(j,l)->AddSubMatrix(*vdofs[j], *vdofs[l],
                                               *elmats(j,l), skip_zeros);
                   }
@@ -1504,13 +1548,16 @@ void BlockNonlinearForm::ComputeGradientBlocked(const BlockVector &bx,
       }
    }
 
-   if (finalize && !Grads(0,0)->Finalized())
+   if (finalize)
    {
       for (int i=0; i<fes.Size(); ++i)
       {
          for (int j=0; j<fes.Size(); ++j)
          {
-            Grads(i,j)->Finalize(skip_zeros);
+            if (Grads(i,j) && !Grads(i,j)->Finalized())
+            {
+               Grads(i,j)->Finalize(skip_zeros);
+            }
          }
       }
    }
@@ -1529,10 +1576,25 @@ void BlockNonlinearForm::ComputeGradientBlocked(const BlockVector &bx,
 
 Operator &BlockNonlinearForm::GetGradient(const Vector &x) const
 {
+   const Array2D<int> all;
+   return GetGradient(x, all);
+}
+
+BlockOperator &BlockNonlinearForm::GetGradient(
+   const Vector &x, const Array2D<int> &mask) const
+{
+   MFEM_VERIFY(is_serial, "Selective gradient prototype is serial only.");
+   MFEM_VERIFY((mask.NumRows() == 0 && mask.NumCols() == 0) ||
+               (mask.NumRows() == fes.Size() && mask.NumCols() == fes.Size()),
+               "Gradient block mask must be empty or match the block count.");
+
+   // Existing references are invalidated before any block is replaced.
+   delete BlockGrad;
+   BlockGrad = NULL;
    BlockVector bx(const_cast<Vector&>(x), block_trueOffsets);
    const BlockVector &pbx = Prolongate(bx);
 
-   ComputeGradientBlocked(pbx);
+   ComputeGradientBlocked(pbx, true, &mask);
 
    Array2D<SparseMatrix *> mGrads(fes.Size(), fes.Size());
    mGrads = Grads;
@@ -1543,6 +1605,8 @@ Operator &BlockNonlinearForm::GetGradient(const Vector &x) const
          for (int s2 = 0; s2 < fes.Size(); ++s2)
          {
             delete cGrads(s1, s2);
+            cGrads(s1, s2) = NULL;
+            if (!Grads(s1, s2)) { continue; }
             if (cP[s1] && cP[s2])
             {
                cGrads(s1, s2) = RAP(*cP[s1], *Grads(s1, s2), *cP[s2]);
@@ -1573,25 +1637,33 @@ Operator &BlockNonlinearForm::GetGradient(const Vector &x) const
          {
             if (s == j)
             {
-               mGrads(s, s)->EliminateRowCol((*ess_tdofs[s])[i],
-                                             Matrix::DIAG_ONE);
+               if (mGrads(s, s))
+               {
+                  mGrads(s, s)->EliminateRowCol((*ess_tdofs[s])[i],
+                                                Matrix::DIAG_ONE);
+               }
             }
             else
             {
-               mGrads(s, j)->EliminateRow((*ess_tdofs[s])[i]);
-               mGrads(j, s)->EliminateCol((*ess_tdofs[s])[i]);
+               if (mGrads(s, j))
+               {
+                  mGrads(s, j)->EliminateRow((*ess_tdofs[s])[i]);
+               }
+               if (mGrads(j, s))
+               {
+                  mGrads(j, s)->EliminateCol((*ess_tdofs[s])[i]);
+               }
             }
          }
       }
    }
 
-   delete BlockGrad;
    BlockGrad = new BlockOperator(block_trueOffsets);
    for (int i = 0; i < fes.Size(); ++i)
    {
       for (int j = 0; j < fes.Size(); ++j)
       {
-         BlockGrad->SetBlock(i, j, mGrads(i, j));
+         if (mGrads(i, j)) { BlockGrad->SetBlock(i, j, mGrads(i, j)); }
       }
    }
    return *BlockGrad;
